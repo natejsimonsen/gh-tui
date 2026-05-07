@@ -1,4 +1,4 @@
-gh-tui
+/gh-tui
 dist/
 *.exe
 *.dll

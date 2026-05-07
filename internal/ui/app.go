@@ -29,11 +29,13 @@ type App struct {
 	checks   ChecksModel
 	reviews  ReviewsModel
 
-	client   *github.Client
-	repo     github.Repo
-	prDetail *github.PRDetail
-	pageInfo github.PageInfo
-	filter   []string
+	client       *github.Client
+	repo         github.Repo
+	prDetail     *github.PRDetail
+	pageInfo     github.PageInfo
+	filter       []string
+	author       string
+	filterByUser bool
 
 	width  int
 	height int
@@ -54,17 +56,19 @@ type errMsg struct {
 	err error
 }
 
-func NewApp(client *github.Client, repo github.Repo) App {
+func NewApp(client *github.Client, repo github.Repo, author string) App {
 	return App{
-		mode:     ModeList,
-		list:     NewListModel(),
-		detail:   NewDetailModel(),
-		comments: NewCommentsModel(),
-		checks:   NewChecksModel(),
-		reviews:  NewReviewsModel(),
-		client:   client,
-		repo:     repo,
-		filter:   []string{"OPEN"},
+		mode:         ModeList,
+		list:         NewListModel(),
+		detail:       NewDetailModel(),
+		comments:     NewCommentsModel(),
+		checks:       NewChecksModel(),
+		reviews:      NewReviewsModel(),
+		client:       client,
+		repo:         repo,
+		filter:       []string{"OPEN"},
+		author:       author,
+		filterByUser: author != "",
 	}
 }
 
@@ -114,8 +118,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case prsLoadedMsg:
 		a.loading = false
 		a.pageInfo = msg.result.PageInfo
-		a.list.SetPRs(msg.result.PullRequests)
-		a.statusMsg = fmt.Sprintf("%d PRs", msg.result.TotalCount)
+		prs := msg.result.PullRequests
+		if a.filterByUser && a.author != "" {
+			filtered := prs[:0:0]
+			for _, pr := range prs {
+				if strings.EqualFold(pr.Author, a.author) {
+					filtered = append(filtered, pr)
+				}
+			}
+			prs = filtered
+		}
+		a.list.SetPRs(prs)
+		if a.filterByUser {
+			a.statusMsg = fmt.Sprintf("%d/%d PRs (@%s)", len(prs), msg.result.TotalCount, a.author)
+		} else {
+			a.statusMsg = fmt.Sprintf("%d PRs", msg.result.TotalCount)
+		}
 		return a, nil
 
 	case prDetailLoadedMsg:
@@ -186,6 +204,16 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.pageInfo = github.PageInfo{}
 		a.loading = true
 		a.statusMsg = "Loading all PRs..."
+		return a, a.fetchPRs()
+	case key.Matches(msg, keys.Mine):
+		a.filterByUser = !a.filterByUser
+		a.pageInfo = github.PageInfo{}
+		a.loading = true
+		if a.filterByUser {
+			a.statusMsg = fmt.Sprintf("Loading @%s PRs...", a.author)
+		} else {
+			a.statusMsg = "Loading all authors..."
+		}
 		return a, a.fetchPRs()
 	}
 
@@ -271,25 +299,32 @@ func (a App) listView() string {
 }
 
 func (a App) filterLabel() string {
+	var state string
 	if len(a.filter) == 0 {
-		return headerStyle.Render("All PRs")
+		state = "All"
+	} else {
+		switch a.filter[0] {
+		case "OPEN":
+			state = openStyle.Render("Open")
+		case "MERGED":
+			state = mergedStyle.Render("Merged")
+		case "CLOSED":
+			state = closedStyle.Render("Closed")
+		}
 	}
-	switch a.filter[0] {
-	case "OPEN":
-		return headerStyle.Render(openStyle.Render("Open PRs"))
-	case "MERGED":
-		return headerStyle.Render(mergedStyle.Render("Merged PRs"))
-	case "CLOSED":
-		return headerStyle.Render(closedStyle.Render("Closed PRs"))
+
+	label := state + " PRs"
+	if a.filterByUser && a.author != "" {
+		label += " · @" + a.author
 	}
-	return ""
+	return headerStyle.Render(label)
 }
 
 func (a App) footerView() string {
 	var help string
 	switch a.mode {
 	case ModeList:
-		help = "j/k: navigate  Enter: view  o: open  m: merged  x: closed  a: all  q: quit"
+		help = "j/k: navigate  Enter: view  o: open  m: merged  x: closed  a: all  u: mine  q: quit"
 	case ModeDetail:
 		help = "j/k: scroll  Esc: back  c: comments  s: checks  r: reviews  q: quit"
 	case ModeComments, ModeChecks, ModeReviews:

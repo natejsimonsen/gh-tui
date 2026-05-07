@@ -13,6 +13,7 @@ type keyMap struct {
 	Merged   key.Binding
 	Closed   key.Binding
 	All      key.Binding
+	Mine     key.Binding
 	Comments key.Binding
 	Checks   key.Binding
 	Reviews  key.Binding
@@ -29,6 +30,7 @@ var keys = keyMap{
 	Merged:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "merged")),
 	Closed:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "closed")),
 	All:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
+	Mine:     key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "mine")),
 	Comments: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "comments")),
 	Checks:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "checks")),
 	Reviews:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reviews")),

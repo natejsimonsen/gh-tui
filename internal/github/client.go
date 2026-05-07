@@ -29,6 +29,16 @@ func NewClient() (*Client, error) {
 	}, nil
 }
 
+func DetectUser() string {
+	out, err := exec.Command("gh", "api", "user", "-q", ".login").Output()
+	if err == nil {
+		if u := strings.TrimSpace(string(out)); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
 func detectToken() string {
 	out, err := exec.Command("gh", "auth", "token").Output()
 	if err == nil {
@@ -455,8 +465,8 @@ func DetectRepo() (Repo, error) {
 	url := strings.TrimSpace(string(out))
 	url = strings.TrimSuffix(url, ".git")
 
-	if strings.HasPrefix(url, "git@github.com:") {
-		return ParseRepo(strings.TrimPrefix(url, "git@github.com:"))
+	if idx := strings.Index(url, "@github.com:"); idx >= 0 {
+		return ParseRepo(url[idx+len("@github.com:"):])
 	}
 	if idx := strings.Index(url, "github.com/"); idx >= 0 {
 		return ParseRepo(url[idx+len("github.com/"):])
