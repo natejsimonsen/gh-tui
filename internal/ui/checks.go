@@ -33,6 +33,7 @@ func (m *ChecksModel) SetSize(w, h int) {
 	}
 	if !m.ready {
 		m.viewport = viewport.New(w, bodyH)
+		m.viewport.KeyMap = viewportKeyMap()
 		m.ready = true
 	} else {
 		m.viewport.Width = w
@@ -46,7 +47,9 @@ func (m *ChecksModel) renderContent() {
 		return
 	}
 	if len(m.checks) == 0 {
-		m.viewport.SetContent(metaStyle.Render("No checks."))
+		if m.ready {
+			m.viewport.SetContent(metaStyle.Render("No checks."))
+		}
 		return
 	}
 
@@ -55,7 +58,9 @@ func (m *ChecksModel) renderContent() {
 		icon := checkIcon(c.Conclusion, c.Status)
 		b.WriteString(fmt.Sprintf("  %s  %s\n", icon, c.Name))
 	}
-	m.viewport.SetContent(b.String())
+	if m.ready {
+		m.viewport.SetContent(b.String())
+	}
 }
 
 func checkIcon(conclusion, status string) string {
@@ -73,6 +78,9 @@ func checkIcon(conclusion, status string) string {
 		return ciPendStyle.Render("○")
 	}
 }
+
+func (m *ChecksModel) GotoTop()    { m.viewport.GotoTop() }
+func (m *ChecksModel) GotoBottom() { m.viewport.GotoBottom() }
 
 func (m ChecksModel) Update(msg tea.Msg) (ChecksModel, tea.Cmd) {
 	var cmd tea.Cmd

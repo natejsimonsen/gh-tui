@@ -23,11 +23,15 @@ func NewListModel() ListModel {
 		table.WithFocused(true),
 		table.WithHeight(20),
 	)
+	applyTableStyles(&t)
+	return ListModel{table: t}
+}
 
+func applyTableStyles(t *table.Model) {
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(subtle).
+		BorderForeground(dividerStyle.GetForeground()).
 		BorderBottom(true).
 		Bold(true)
 	s.Selected = s.Selected.
@@ -35,8 +39,20 @@ func NewListModel() ListModel {
 		Background(lipgloss.Color("57")).
 		Bold(false)
 	t.SetStyles(s)
+}
 
-	return ListModel{table: t}
+func (m *ListModel) ApplyTheme(t Theme) {
+	s := table.DefaultStyles()
+	s.Header = s.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color(t.Border)).
+		BorderBottom(true).
+		Bold(true)
+	s.Selected = s.Selected.
+		Foreground(lipgloss.Color(t.Fg)).
+		Background(lipgloss.Color(t.BgHighlight)).
+		Bold(false)
+	m.table.SetStyles(s)
 }
 
 func (m *ListModel) SetPRs(prs []github.PullRequest) {
@@ -71,6 +87,9 @@ func (m *ListModel) SelectedPR() *github.PullRequest {
 	}
 	return nil
 }
+
+func (m *ListModel) GotoTop()    { m.table.GotoTop() }
+func (m *ListModel) GotoBottom() { m.table.GotoBottom() }
 
 func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 	var cmd tea.Cmd
@@ -109,15 +128,15 @@ func defaultColumns(width int) []table.Column {
 
 func formatState(state string, isDraft bool) string {
 	if isDraft {
-		return draftStyle.Render("Draft")
+		return "Draft"
 	}
 	switch state {
 	case "OPEN":
-		return openStyle.Render("Open")
+		return "Open"
 	case "MERGED":
-		return mergedStyle.Render("Merged")
+		return "Merged"
 	case "CLOSED":
-		return closedStyle.Render("Closed")
+		return "Closed"
 	}
 	return state
 }
@@ -125,13 +144,13 @@ func formatState(state string, isDraft bool) string {
 func formatCI(status string) string {
 	switch status {
 	case "SUCCESS":
-		return ciPassStyle.Render("✓ pass")
+		return "✓ pass"
 	case "FAILURE", "ERROR":
-		return ciFailStyle.Render("✗ fail")
+		return "✗ fail"
 	case "PENDING", "EXPECTED":
-		return ciPendStyle.Render("○ pend")
+		return "○ pend"
 	case "":
-		return metaStyle.Render("—")
+		return "—"
 	}
 	return status
 }
@@ -184,11 +203,12 @@ func timeAgo(t time.Time) string {
 }
 
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen <= 1 {
-		return s[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return s[:maxLen-1] + "…"
+	return string(runes[:maxLen-1]) + "…"
 }

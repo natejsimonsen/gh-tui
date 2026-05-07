@@ -36,6 +36,7 @@ func (m *DetailModel) SetSize(w, h int) {
 	}
 	if !m.ready {
 		m.viewport = viewport.New(w, bodyH)
+		m.viewport.KeyMap = viewportKeyMap()
 		m.ready = true
 	} else {
 		m.viewport.Width = w
@@ -63,7 +64,9 @@ func (m *DetailModel) renderContent() {
 		content = metaStyle.Render("No description provided.")
 	}
 
-	m.viewport.SetContent(content)
+	if m.ready {
+		m.viewport.SetContent(content)
+	}
 }
 
 func (m DetailModel) headerView() string {
@@ -106,6 +109,9 @@ func (m DetailModel) headerView() string {
 
 	return fmt.Sprintf("%s\n%s\n%s\n%s", line1, line2, line3, divider)
 }
+
+func (m *DetailModel) GotoTop()    { m.viewport.GotoTop() }
+func (m *DetailModel) GotoBottom() { m.viewport.GotoBottom() }
 
 func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	var cmd tea.Cmd

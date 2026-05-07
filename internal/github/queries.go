@@ -48,6 +48,54 @@ query($owner: String!, $name: String!, $states: [PullRequestState!], $first: Int
 }
 `
 
+const searchPRsQuery = `
+query($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    issueCount
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        author { login }
+        state
+        isDraft
+        updatedAt
+        labels(first: 5) {
+          nodes { name color }
+        }
+        reviewRequests(first: 10) {
+          nodes {
+            requestedReviewer {
+              ... on User { login }
+              ... on Team { name }
+            }
+          }
+        }
+        latestOpinionatedReviews(first: 10) {
+          nodes {
+            author { login }
+            state
+          }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+`
+
 const prDetailQuery = `
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {

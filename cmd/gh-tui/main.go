@@ -55,9 +55,15 @@ If no repo is specified, detects from git remote origin.
 
 Keys:
   j/k         Navigate up/down
+  d/u         Half page down/up
+  G/gg        Jump to bottom/top
   Enter       View PR detail
   Esc         Go back
   o/m/x/a     Filter: open/merged/closed/all
-  c/s/r       Comments/checks/reviews (in detail view)
+  u           Toggle my PRs
+  c/s/f       Conversation/checks/files
+  b           Open in browser
+  t           Theme picker
+  ?           Help
   q           Quit`)
 }

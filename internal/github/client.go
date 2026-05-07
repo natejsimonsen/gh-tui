@@ -230,6 +230,89 @@ func (c *Client) ListPRs(ctx context.Context, repo Repo, states []string, first 
 	return result, nil
 }
 
+type searchPRsResponse struct {
+	Search struct {
+		IssueCount int `json:"issueCount"`
+		PageInfo   struct {
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
+		} `json:"pageInfo"`
+		Nodes []prNode `json:"nodes"`
+	} `json:"search"`
+}
+
+func (c *Client) SearchPRs(ctx context.Context, repo Repo, author string, states []string, first int, after string) (*PRListResult, error) {
+	q := fmt.Sprintf("is:pr repo:%s/%s author:%s sort:updated-desc", repo.Owner, repo.Name, author)
+	for _, s := range states {
+		q += " is:" + strings.ToLower(s)
+	}
+
+	vars := map[string]any{
+		"query": q,
+		"first": first,
+	}
+	if after != "" {
+		vars["after"] = after
+	}
+
+	data, err := c.query(ctx, searchPRsQuery, vars)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp searchPRsResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+
+	result := &PRListResult{
+		TotalCount: resp.Search.IssueCount,
+		PageInfo: PageInfo{
+			HasNextPage: resp.Search.PageInfo.HasNextPage,
+			EndCursor:   resp.Search.PageInfo.EndCursor,
+		},
+	}
+
+	for _, n := range resp.Search.Nodes {
+		pr := PullRequest{
+			Number:    n.Number,
+			Title:     n.Title,
+			Author:    actorLogin(n.Author),
+			State:     n.State,
+			IsDraft:   n.IsDraft,
+			UpdatedAt: n.UpdatedAt,
+		}
+		for _, l := range n.Labels.Nodes {
+			pr.Labels = append(pr.Labels, Label{Name: l.Name, Color: l.Color})
+		}
+		seen := map[string]bool{}
+		for _, r := range n.LatestOpinionatedReviews.Nodes {
+			login := actorLogin(r.Author)
+			if login != "" {
+				pr.Reviewers = append(pr.Reviewers, Reviewer{Login: login, State: r.State})
+				seen[login] = true
+			}
+		}
+		for _, r := range n.ReviewRequests.Nodes {
+			login := r.RequestedReviewer.Login
+			if login == "" {
+				login = r.RequestedReviewer.Name
+			}
+			if login != "" && !seen[login] {
+				pr.Reviewers = append(pr.Reviewers, Reviewer{Login: login, State: "REQUESTED"})
+			}
+		}
+		if len(n.Commits.Nodes) > 0 {
+			if rollup := n.Commits.Nodes[0].Commit.StatusCheckRollup; rollup != nil {
+				pr.CIStatus = rollup.State
+			}
+		}
+		result.PullRequests = append(result.PullRequests, pr)
+	}
+
+	return result, nil
+}
+
 // PR Detail
 
 type prDetailResponse struct {
@@ -447,6 +530,31 @@ func (c *Client) GetPRDetail(ctx context.Context, repo Repo, number int) (*PRDet
 	}
 
 	return detail, nil
+}
+
+func (c *Client) GetPRDiff(ctx context.Context, repo Repo, number int) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", repo.Owner, repo.Name, number)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github.diff")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("diff request failed: %s", resp.Status)
+	}
+	return string(body), nil
 }
 
 func ParseRepo(s string) (Repo, error) {

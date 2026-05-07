@@ -3,6 +3,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -16,18 +18,23 @@ type Mode int
 const (
 	ModeList Mode = iota
 	ModeDetail
-	ModeComments
+	ModeConversation
 	ModeChecks
-	ModeReviews
+	ModeFiles
+	ModeHelp
+	ModeThemePicker
 )
 
 type App struct {
 	mode     Mode
-	list     ListModel
-	detail   DetailModel
-	comments CommentsModel
-	checks   ChecksModel
-	reviews  ReviewsModel
+	prevMode Mode
+
+	list         ListModel
+	detail       DetailModel
+	conversation ConversationModel
+	checks       ChecksModel
+	files        DiffModel
+	help         HelpModel
 
 	client       *github.Client
 	repo         github.Repo
@@ -40,8 +47,11 @@ type App struct {
 	width  int
 	height int
 
-	loading   bool
-	statusMsg string
+	loading    bool
+	statusMsg  string
+	pendingG   bool
+	themeIdx   int
+	themeCursor int
 }
 
 type prsLoadedMsg struct {
@@ -50,6 +60,10 @@ type prsLoadedMsg struct {
 
 type prDetailLoadedMsg struct {
 	detail *github.PRDetail
+}
+
+type diffLoadedMsg struct {
+	diff string
 }
 
 type errMsg struct {
@@ -61,9 +75,10 @@ func NewApp(client *github.Client, repo github.Repo, author string) App {
 		mode:         ModeList,
 		list:         NewListModel(),
 		detail:       NewDetailModel(),
-		comments:     NewCommentsModel(),
+		conversation: NewConversationModel(),
 		checks:       NewChecksModel(),
-		reviews:      NewReviewsModel(),
+		files:        NewDiffModel(),
+		help:         NewHelpModel(),
 		client:       client,
 		repo:         repo,
 		filter:       []string{"OPEN"},
@@ -81,8 +96,16 @@ func (a App) fetchPRs() tea.Cmd {
 	repo := a.repo
 	filter := a.filter
 	cursor := a.pageInfo.EndCursor
+	filterByUser := a.filterByUser
+	author := a.author
 	return func() tea.Msg {
-		result, err := client.ListPRs(context.Background(), repo, filter, 50, cursor)
+		var result *github.PRListResult
+		var err error
+		if filterByUser && author != "" {
+			result, err = client.SearchPRs(context.Background(), repo, author, filter, 50, cursor)
+		} else {
+			result, err = client.ListPRs(context.Background(), repo, filter, 50, cursor)
+		}
 		if err != nil {
 			return errMsg{err}
 		}
@@ -102,6 +125,18 @@ func (a App) fetchPRDetail(number int) tea.Cmd {
 	}
 }
 
+func (a App) fetchDiff(number int) tea.Cmd {
+	client := a.client
+	repo := a.repo
+	return func() tea.Msg {
+		diff, err := client.GetPRDiff(context.Background(), repo, number)
+		if err != nil {
+			return errMsg{err}
+		}
+		return diffLoadedMsg{diff}
+	}
+}
+
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -110,27 +145,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		contentH := msg.Height - 2
 		a.list.SetSize(msg.Width, contentH)
 		a.detail.SetSize(msg.Width, contentH)
-		a.comments.SetSize(msg.Width, contentH)
+		a.conversation.SetSize(msg.Width, contentH)
 		a.checks.SetSize(msg.Width, contentH)
-		a.reviews.SetSize(msg.Width, contentH)
+		a.files.SetSize(msg.Width, contentH)
+		a.help.SetSize(msg.Width, contentH)
 		return a, nil
 
 	case prsLoadedMsg:
 		a.loading = false
 		a.pageInfo = msg.result.PageInfo
-		prs := msg.result.PullRequests
-		if a.filterByUser && a.author != "" {
-			filtered := prs[:0:0]
-			for _, pr := range prs {
-				if strings.EqualFold(pr.Author, a.author) {
-					filtered = append(filtered, pr)
-				}
-			}
-			prs = filtered
-		}
-		a.list.SetPRs(prs)
+		a.list.SetPRs(msg.result.PullRequests)
 		if a.filterByUser {
-			a.statusMsg = fmt.Sprintf("%d/%d PRs (@%s)", len(prs), msg.result.TotalCount, a.author)
+			a.statusMsg = fmt.Sprintf("%d PRs (@%s)", msg.result.TotalCount, a.author)
 		} else {
 			a.statusMsg = fmt.Sprintf("%d PRs", msg.result.TotalCount)
 		}
@@ -141,9 +167,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.prDetail = msg.detail
 		a.mode = ModeDetail
 		a.detail.SetPR(msg.detail)
-		a.comments.SetComments(msg.detail.Comments)
+		a.conversation.SetData(msg.detail.Comments, msg.detail.Reviews)
 		a.checks.SetChecks(msg.detail.Checks)
-		a.reviews.SetReviews(msg.detail.Reviews)
+		a.files.SetDiff("")
+		return a, nil
+
+	case diffLoadedMsg:
+		a.loading = false
+		a.files.SetDiff(msg.diff)
+		a.mode = ModeFiles
+		a.statusMsg = "Diff loaded"
 		return a, nil
 
 	case errMsg:
@@ -152,28 +185,54 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
-		if key.Matches(msg, keys.Quit) {
+		if key.Matches(msg, keys.Quit) && a.mode != ModeThemePicker {
 			return a, tea.Quit
 		}
-		return a.handleKeyForMode(msg)
+		return a.handleKeys(msg)
 	}
 
 	return a.updateActiveModel(msg)
 }
 
-func (a App) handleKeyForMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a App) handleKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.mode == ModeThemePicker {
+		return a.handleThemePickerKeys(msg)
+	}
+
+	if key.Matches(msg, keys.Help) {
+		if a.mode == ModeHelp {
+			a.mode = a.prevMode
+		} else {
+			a.prevMode = a.mode
+			a.mode = ModeHelp
+		}
+		return a, nil
+	}
+
+	if msg.String() == "t" {
+		a.themeCursor = a.themeIdx
+		a.prevMode = a.mode
+		a.mode = ModeThemePicker
+		return a, nil
+	}
+
 	switch a.mode {
 	case ModeList:
 		return a.handleListKeys(msg)
-	case ModeDetail:
-		return a.handleDetailKeys(msg)
-	case ModeComments, ModeChecks, ModeReviews:
-		return a.handleSubviewKeys(msg)
+	default:
+		return a.handleViewKeys(msg)
 	}
-	return a, nil
 }
 
 func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.pendingG {
+		a.pendingG = false
+		if msg.String() == "g" {
+			a.list.GotoTop()
+			return a, nil
+		}
+	}
+
 	switch {
 	case key.Matches(msg, keys.Enter):
 		if pr := a.list.SelectedPR(); pr != nil {
@@ -215,6 +274,14 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.statusMsg = "Loading all authors..."
 		}
 		return a, a.fetchPRs()
+	case key.Matches(msg, keys.Browser):
+		return a.openInBrowser()
+	case msg.String() == "G":
+		a.list.GotoBottom()
+		return a, nil
+	case msg.String() == "g":
+		a.pendingG = true
+		return a, nil
 	}
 
 	var cmd tea.Cmd
@@ -222,33 +289,104 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-func (a App) handleDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a App) handleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.pendingG {
+		a.pendingG = false
+		if msg.String() == "g" {
+			a.scrollTop()
+			return a, nil
+		}
+	}
+
 	switch {
 	case key.Matches(msg, keys.Back):
-		a.mode = ModeList
+		if a.mode == ModeDetail {
+			a.mode = ModeList
+		} else {
+			a.mode = ModeDetail
+		}
 		return a, nil
-	case key.Matches(msg, keys.Comments):
-		a.mode = ModeComments
+	case key.Matches(msg, keys.Conversation):
+		a.mode = ModeConversation
 		return a, nil
 	case key.Matches(msg, keys.Checks):
 		a.mode = ModeChecks
 		return a, nil
-	case key.Matches(msg, keys.Reviews):
-		a.mode = ModeReviews
+	case key.Matches(msg, keys.Files):
+		if !a.files.HasContent() && a.prDetail != nil {
+			a.loading = true
+			a.statusMsg = "Loading diff..."
+			return a, a.fetchDiff(a.prDetail.Number)
+		}
+		a.mode = ModeFiles
+		return a, nil
+	case key.Matches(msg, keys.Browser):
+		return a.openInBrowser()
+	case msg.String() == "G":
+		a.scrollBottom()
+		return a, nil
+	case msg.String() == "g":
+		a.pendingG = true
 		return a, nil
 	}
 
-	var cmd tea.Cmd
-	a.detail, cmd = a.detail.Update(msg)
-	return a, cmd
+	return a.updateActiveModel(msg)
 }
 
-func (a App) handleSubviewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, keys.Back) {
-		a.mode = ModeDetail
+func (a App) handleThemePickerKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Back), key.Matches(msg, keys.Quit):
+		applyTheme(themes[a.themeIdx])
+		a.list.ApplyTheme(themes[a.themeIdx])
+		a.mode = a.prevMode
+		return a, nil
+	case key.Matches(msg, keys.Enter):
+		a.themeIdx = a.themeCursor
+		a.statusMsg = "Theme: " + themes[a.themeIdx].Name
+		a.mode = a.prevMode
+		return a, nil
+	case key.Matches(msg, keys.Down):
+		a.themeCursor = (a.themeCursor + 1) % len(themes)
+		applyTheme(themes[a.themeCursor])
+		a.list.ApplyTheme(themes[a.themeCursor])
+		return a, nil
+	case key.Matches(msg, keys.Up):
+		a.themeCursor = (a.themeCursor - 1 + len(themes)) % len(themes)
+		applyTheme(themes[a.themeCursor])
+		a.list.ApplyTheme(themes[a.themeCursor])
 		return a, nil
 	}
-	return a.updateActiveModel(msg)
+	return a, nil
+}
+
+func (a *App) scrollTop() {
+	switch a.mode {
+	case ModeDetail:
+		a.detail.GotoTop()
+	case ModeConversation:
+		a.conversation.GotoTop()
+	case ModeChecks:
+		a.checks.GotoTop()
+	case ModeFiles:
+		a.files.GotoTop()
+	case ModeHelp:
+		a.help.GotoTop()
+	}
+}
+
+func (a *App) scrollBottom() {
+	switch a.mode {
+	case ModeDetail:
+		a.detail.GotoBottom()
+	case ModeConversation:
+		a.conversation.GotoBottom()
+	case ModeChecks:
+		a.checks.GotoBottom()
+	case ModeFiles:
+		a.files.GotoBottom()
+	case ModeHelp:
+		a.help.GotoBottom()
+	}
 }
 
 func (a App) updateActiveModel(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -258,12 +396,14 @@ func (a App) updateActiveModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.list, cmd = a.list.Update(msg)
 	case ModeDetail:
 		a.detail, cmd = a.detail.Update(msg)
-	case ModeComments:
-		a.comments, cmd = a.comments.Update(msg)
+	case ModeConversation:
+		a.conversation, cmd = a.conversation.Update(msg)
 	case ModeChecks:
 		a.checks, cmd = a.checks.Update(msg)
-	case ModeReviews:
-		a.reviews, cmd = a.reviews.Update(msg)
+	case ModeFiles:
+		a.files, cmd = a.files.Update(msg)
+	case ModeHelp:
+		a.help, cmd = a.help.Update(msg)
 	}
 	return a, cmd
 }
@@ -275,12 +415,16 @@ func (a App) View() string {
 		content = a.listView()
 	case ModeDetail:
 		content = a.detail.View()
-	case ModeComments:
-		content = a.comments.View()
+	case ModeConversation:
+		content = a.conversation.View()
 	case ModeChecks:
 		content = a.checks.View()
-	case ModeReviews:
-		content = a.reviews.View()
+	case ModeFiles:
+		content = a.files.View()
+	case ModeHelp:
+		content = a.help.View()
+	case ModeThemePicker:
+		content = a.themePickerView()
 	}
 
 	return content + "\n" + a.footerView()
@@ -320,15 +464,40 @@ func (a App) filterLabel() string {
 	return headerStyle.Render(label)
 }
 
+func (a App) themePickerView() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Select Theme") + "\n\n")
+	for i, t := range themes {
+		cursor := "  "
+		if i == a.themeCursor {
+			cursor = "> "
+		}
+		name := t.Name
+		if i == a.themeIdx {
+			name += " (current)"
+		}
+		if i == a.themeCursor {
+			b.WriteString(authorStyle.Render(cursor + name) + "\n")
+		} else {
+			b.WriteString(metaStyle.Render(cursor+name) + "\n")
+		}
+	}
+	return b.String()
+}
+
 func (a App) footerView() string {
 	var help string
 	switch a.mode {
 	case ModeList:
-		help = "j/k: navigate  Enter: view  o: open  m: merged  x: closed  a: all  u: mine  q: quit"
+		help = "j/k: nav  G/gg: end/top  Enter: view  o/m/x/a: filter  u: mine  b: browser  t: theme  ?: help  q: quit"
 	case ModeDetail:
-		help = "j/k: scroll  Esc: back  c: comments  s: checks  r: reviews  q: quit"
-	case ModeComments, ModeChecks, ModeReviews:
-		help = "j/k: scroll  Esc: back  q: quit"
+		help = "j/k: scroll  d/u: ½pg  G/gg: end/top  c: convo  s: checks  f: files  b: browser  Esc: back  q: quit"
+	case ModeConversation, ModeChecks, ModeFiles:
+		help = "j/k: scroll  d/u: ½pg  G/gg: end/top  c/s/f: switch  b: browser  Esc: back  q: quit"
+	case ModeHelp:
+		help = "j/k: scroll  ?: close  Esc: close  q: quit"
+	case ModeThemePicker:
+		help = "j/k: navigate  Enter: apply  Esc: cancel"
 	}
 
 	status := a.statusMsg
@@ -344,4 +513,39 @@ func (a App) footerView() string {
 	}
 
 	return helpText + strings.Repeat(" ", gap) + statusText
+}
+
+func (a App) openInBrowser() (tea.Model, tea.Cmd) {
+	var number int
+	if a.mode == ModeList {
+		if pr := a.list.SelectedPR(); pr != nil {
+			number = pr.Number
+		}
+	} else if a.prDetail != nil {
+		number = a.prDetail.Number
+	}
+	if number == 0 {
+		return a, nil
+	}
+	url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", a.repo.Owner, a.repo.Name, number)
+	a.statusMsg = fmt.Sprintf("Opening #%d in browser...", number)
+	return a, func() tea.Msg {
+		openURL(url)
+		return nil
+	}
+}
+
+func openURL(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	default:
+		return
+	}
+	cmd.Start()
 }
