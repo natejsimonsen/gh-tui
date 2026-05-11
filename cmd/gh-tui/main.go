@@ -61,6 +61,7 @@ Keys:
   Esc         Go back
   o/m/x/a     Filter: open/merged/closed/all
   u           Toggle my PRs
+  r           Toggle review requests
   c/s/f       Conversation/checks/files
   b           Open in browser
   t           Theme picker

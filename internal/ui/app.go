@@ -36,21 +36,22 @@ type App struct {
 	files        DiffModel
 	help         HelpModel
 
-	client       *github.Client
-	repo         github.Repo
-	prDetail     *github.PRDetail
-	pageInfo     github.PageInfo
-	filter       []string
-	author       string
-	filterByUser bool
+	client         *github.Client
+	repo           github.Repo
+	prDetail       *github.PRDetail
+	pageInfo       github.PageInfo
+	filter         []string
+	author         string
+	filterByUser   bool
+	filterByReview bool
 
 	width  int
 	height int
 
-	loading    bool
-	statusMsg  string
-	pendingG   bool
-	themeIdx   int
+	loading     bool
+	statusMsg   string
+	pendingG    bool
+	themeIdx    int
 	themeCursor int
 }
 
@@ -97,11 +98,14 @@ func (a App) fetchPRs() tea.Cmd {
 	filter := a.filter
 	cursor := a.pageInfo.EndCursor
 	filterByUser := a.filterByUser
+	filterByReview := a.filterByReview
 	author := a.author
 	return func() tea.Msg {
 		var result *github.PRListResult
 		var err error
-		if filterByUser && author != "" {
+		if filterByReview && author != "" {
+			result, err = client.SearchReviewRequested(context.Background(), repo, author, filter, 50, cursor)
+		} else if filterByUser && author != "" {
 			result, err = client.SearchPRs(context.Background(), repo, author, filter, 50, cursor)
 		} else {
 			result, err = client.ListPRs(context.Background(), repo, filter, 50, cursor)
@@ -155,7 +159,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.loading = false
 		a.pageInfo = msg.result.PageInfo
 		a.list.SetPRs(msg.result.PullRequests)
-		if a.filterByUser {
+		if a.filterByReview {
+			a.statusMsg = fmt.Sprintf("%d reviews (@%s)", msg.result.TotalCount, a.author)
+		} else if a.filterByUser {
 			a.statusMsg = fmt.Sprintf("%d PRs (@%s)", msg.result.TotalCount, a.author)
 		} else {
 			a.statusMsg = fmt.Sprintf("%d PRs", msg.result.TotalCount)
@@ -265,6 +271,7 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.statusMsg = "Loading all PRs..."
 		return a, a.fetchPRs()
 	case key.Matches(msg, keys.Mine):
+		a.filterByReview = false
 		a.filterByUser = !a.filterByUser
 		a.pageInfo = github.PageInfo{}
 		a.loading = true
@@ -272,6 +279,17 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.statusMsg = fmt.Sprintf("Loading @%s PRs...", a.author)
 		} else {
 			a.statusMsg = "Loading all authors..."
+		}
+		return a, a.fetchPRs()
+	case key.Matches(msg, keys.ReviewRequests):
+		a.filterByUser = false
+		a.filterByReview = !a.filterByReview
+		a.pageInfo = github.PageInfo{}
+		a.loading = true
+		if a.filterByReview {
+			a.statusMsg = fmt.Sprintf("Loading reviews for @%s...", a.author)
+		} else {
+			a.statusMsg = "Loading all PRs..."
 		}
 		return a, a.fetchPRs()
 	case key.Matches(msg, keys.Browser):
@@ -458,7 +476,9 @@ func (a App) filterLabel() string {
 	}
 
 	label := state + " PRs"
-	if a.filterByUser && a.author != "" {
+	if a.filterByReview && a.author != "" {
+		label += " · reviews:@" + a.author
+	} else if a.filterByUser && a.author != "" {
 		label += " · @" + a.author
 	}
 	return headerStyle.Render(label)
@@ -489,15 +509,15 @@ func (a App) footerView() string {
 	var help string
 	switch a.mode {
 	case ModeList:
-		help = "j/k: nav  G/gg: end/top  Enter: view  o/m/x/a: filter  u: mine  b: browser  t: theme  ?: help  q: quit"
+		help = "o/m/x/a  u:mine  r:reviews  ?:help  q:quit"
 	case ModeDetail:
-		help = "j/k: scroll  d/u: ½pg  G/gg: end/top  c: convo  s: checks  f: files  b: browser  Esc: back  q: quit"
+		help = "c/s/f  Esc:back  ?:help"
 	case ModeConversation, ModeChecks, ModeFiles:
-		help = "j/k: scroll  d/u: ½pg  G/gg: end/top  c/s/f: switch  b: browser  Esc: back  q: quit"
+		help = "c/s/f  Esc:back  ?:help"
 	case ModeHelp:
-		help = "j/k: scroll  ?: close  Esc: close  q: quit"
+		help = "Esc:close"
 	case ModeThemePicker:
-		help = "j/k: navigate  Enter: apply  Esc: cancel"
+		help = "Enter:apply  Esc:cancel"
 	}
 
 	status := a.statusMsg

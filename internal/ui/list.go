@@ -5,152 +5,276 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/natejsimonsen/gh-tui/internal/github"
 )
 
+const cardHeight = 3
+
 type ListModel struct {
-	table table.Model
-	prs   []github.PullRequest
-	width int
+	prs    []github.PullRequest
+	cursor int
+	offset int
+	width  int
+	height int
 }
 
 func NewListModel() ListModel {
-	t := table.New(
-		table.WithColumns(defaultColumns(80)),
-		table.WithFocused(true),
-		table.WithHeight(20),
-	)
-	applyTableStyles(&t)
-	return ListModel{table: t}
+	return ListModel{}
 }
 
-func applyTableStyles(t *table.Model) {
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(dividerStyle.GetForeground()).
-		BorderBottom(true).
-		Bold(true)
-	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("57")).
-		Bold(false)
-	t.SetStyles(s)
-}
-
-func (m *ListModel) ApplyTheme(t Theme) {
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color(t.Border)).
-		BorderBottom(true).
-		Bold(true)
-	s.Selected = s.Selected.
-		Foreground(lipgloss.Color(t.Fg)).
-		Background(lipgloss.Color(t.BgHighlight)).
-		Bold(false)
-	m.table.SetStyles(s)
-}
+func (m *ListModel) ApplyTheme(_ Theme) {}
 
 func (m *ListModel) SetPRs(prs []github.PullRequest) {
 	m.prs = prs
-	rows := make([]table.Row, len(prs))
-	for i, pr := range prs {
-		rows[i] = table.Row{
-			fmt.Sprintf("#%d", pr.Number),
-			truncate(pr.Title, m.titleWidth()),
-			pr.Author,
-			formatState(pr.State, pr.IsDraft),
-			formatCI(pr.CIStatus),
-			formatLabels(pr.Labels),
-			formatReviewers(pr.Reviewers),
-			timeAgo(pr.UpdatedAt),
-		}
-	}
-	m.table.SetRows(rows)
+	m.cursor = 0
+	m.offset = 0
 }
 
 func (m *ListModel) SetSize(w, h int) {
 	m.width = w
-	m.table.SetWidth(w)
-	m.table.SetHeight(h - 4)
-	m.table.SetColumns(defaultColumns(w))
+	m.height = h - 2
 }
 
 func (m *ListModel) SelectedPR() *github.PullRequest {
-	idx := m.table.Cursor()
-	if idx >= 0 && idx < len(m.prs) {
-		return &m.prs[idx]
+	if m.cursor >= 0 && m.cursor < len(m.prs) {
+		return &m.prs[m.cursor]
 	}
 	return nil
 }
 
-func (m *ListModel) GotoTop()    { m.table.GotoTop() }
-func (m *ListModel) GotoBottom() { m.table.GotoBottom() }
+func (m *ListModel) VisiblePRs() []github.PullRequest {
+	if len(m.prs) == 0 {
+		return nil
+	}
+	vis := m.visibleCards()
+	end := m.offset + vis
+	if end > len(m.prs) {
+		end = len(m.prs)
+	}
+	return m.prs[m.offset:end]
+}
+
+func (m *ListModel) GotoTop() {
+	m.cursor = 0
+	m.offset = 0
+}
+
+func (m *ListModel) GotoBottom() {
+	if len(m.prs) == 0 {
+		return
+	}
+	m.cursor = len(m.prs) - 1
+	m.fixOffset()
+}
+
+func (m *ListModel) visibleCards() int {
+	n := m.height / cardHeight
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+func (m *ListModel) fixOffset() {
+	vis := m.visibleCards()
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+vis {
+		m.offset = m.cursor - vis + 1
+	}
+	if m.offset < 0 {
+		m.offset = 0
+	}
+}
 
 func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
-	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
-	return m, cmd
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch km.String() {
+		case "j", "down":
+			if m.cursor < len(m.prs)-1 {
+				m.cursor++
+				m.fixOffset()
+			}
+		case "k", "up":
+			if m.cursor > 0 {
+				m.cursor--
+				m.fixOffset()
+			}
+		case "d", "ctrl+d":
+			m.cursor += m.visibleCards() / 2
+			if m.cursor >= len(m.prs) {
+				m.cursor = len(m.prs) - 1
+			}
+			m.fixOffset()
+		case "u", "ctrl+u":
+			m.cursor -= m.visibleCards() / 2
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+			m.fixOffset()
+		}
+	}
+	return m, nil
 }
 
 func (m ListModel) View() string {
-	return m.table.View()
-}
-
-func (m ListModel) titleWidth() int {
-	w := m.width - 82
-	if w < 20 {
-		return 20
+	if len(m.prs) == 0 {
+		return metaStyle.Render("No pull requests.")
 	}
-	return w
+
+	var b strings.Builder
+	vis := m.visibleCards()
+	end := m.offset + vis
+	if end > len(m.prs) {
+		end = len(m.prs)
+	}
+
+	for i := m.offset; i < end; i++ {
+		pr := m.prs[i]
+		selected := i == m.cursor
+
+		var bg lipgloss.Color
+		if selected {
+			bg = activeTheme.SelectedBg
+		}
+
+		prefix := "  "
+		if selected {
+			prefix = lipgloss.NewStyle().Foreground(activeTheme.Purple).Background(bg).Render("▎") +
+				lipgloss.NewStyle().Background(bg).Render(" ")
+		}
+
+		line1 := prefix + m.renderTitle(pr, selected, bg)
+		line2Prefix := "  "
+		if selected {
+			line2Prefix = lipgloss.NewStyle().Background(bg).Render("  ")
+		}
+		line2 := line2Prefix + m.renderMeta(pr, bg)
+
+		if selected {
+			line1 = padWithBg(line1, m.width, bg)
+			line2 = padWithBg(line2, m.width, bg)
+		}
+
+		b.WriteString(line1 + "\n")
+		b.WriteString(line2 + "\n")
+		if i < end-1 {
+			b.WriteByte('\n')
+		}
+	}
+
+	return b.String()
 }
 
-func defaultColumns(width int) []table.Column {
-	titleW := width - 82
+func padWithBg(s string, width int, bg lipgloss.Color) string {
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return s + lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", width-w))
+}
+
+func styledWithBg(s lipgloss.Style, bg lipgloss.Color) lipgloss.Style {
+	if bg != "" {
+		return s.Background(bg)
+	}
+	return s
+}
+
+func (m ListModel) renderTitle(pr github.PullRequest, selected bool, bg lipgloss.Color) string {
+	num := styledWithBg(metaStyle, bg).Render(fmt.Sprintf("#%d", pr.Number))
+	titleW := m.width - 12
 	if titleW < 20 {
 		titleW = 20
 	}
-	return []table.Column{
-		{Title: "#", Width: 7},
-		{Title: "Title", Width: titleW},
-		{Title: "Author", Width: 15},
-		{Title: "Status", Width: 8},
-		{Title: "CI", Width: 10},
-		{Title: "Labels", Width: 20},
-		{Title: "Reviewers", Width: 15},
-		{Title: "Updated", Width: 7},
+	title := truncate(pr.Title, titleW)
+	ts := lipgloss.NewStyle().Bold(true)
+	if selected {
+		ts = ts.Foreground(titleStyle.GetForeground())
 	}
+	title = styledWithBg(ts, bg).Render(title)
+	gap := "  "
+	if bg != "" {
+		gap = lipgloss.NewStyle().Background(bg).Render(gap)
+	}
+	return num + gap + title
 }
 
-func formatState(state string, isDraft bool) string {
+func (m ListModel) renderMeta(pr github.PullRequest, bg lipgloss.Color) string {
+	author := styledWithBg(authorStyle, bg).Render("@" + pr.Author)
+
+	var state string
+	if pr.IsDraft {
+		state = styledWithBg(draftStyle, bg).Render("Draft")
+	} else {
+		switch pr.State {
+		case "OPEN":
+			state = styledWithBg(openStyle, bg).Render("Open")
+		case "MERGED":
+			state = styledWithBg(mergedStyle, bg).Render("Merged")
+		case "CLOSED":
+			state = styledWithBg(closedStyle, bg).Render("Closed")
+		default:
+			state = pr.State
+		}
+	}
+
+	var ci string
+	switch pr.CIStatus {
+	case "SUCCESS":
+		ci = styledWithBg(ciPassStyle, bg).Render("✓ pass")
+	case "FAILURE", "ERROR":
+		ci = styledWithBg(ciFailStyle, bg).Render("✗ fail")
+	case "PENDING", "EXPECTED":
+		ci = styledWithBg(ciPendStyle, bg).Render("○ pend")
+	case "":
+		ci = styledWithBg(metaStyle, bg).Render("—")
+	default:
+		ci = pr.CIStatus
+	}
+
+	updated := styledWithBg(timeStyle, bg).Render(timeAgo(pr.UpdatedAt))
+	parts := []string{author, state, ci, updated}
+
+	if labels := formatLabels(pr.Labels); labels != "" {
+		parts = append(parts, styledWithBg(metaStyle, bg).Render(labels))
+	}
+	if reviewers := formatReviewers(pr.Reviewers); reviewers != "" {
+		parts = append(parts, styledWithBg(metaStyle, bg).Render(reviewers))
+	}
+
+	sep := styledWithBg(metaStyle, bg).Render(" · ")
+	return strings.Join(parts, sep)
+}
+
+func renderState(state string, isDraft bool) string {
 	if isDraft {
-		return "Draft"
+		return draftStyle.Render("Draft")
 	}
 	switch state {
 	case "OPEN":
-		return "Open"
+		return openStyle.Render("Open")
 	case "MERGED":
-		return "Merged"
+		return mergedStyle.Render("Merged")
 	case "CLOSED":
-		return "Closed"
+		return closedStyle.Render("Closed")
 	}
 	return state
 }
 
-func formatCI(status string) string {
+func renderCI(status string) string {
 	switch status {
 	case "SUCCESS":
-		return "✓ pass"
+		return ciPassStyle.Render("✓ pass")
 	case "FAILURE", "ERROR":
-		return "✗ fail"
+		return ciFailStyle.Render("✗ fail")
 	case "PENDING", "EXPECTED":
-		return "○ pend"
+		return ciPendStyle.Render("○ pend")
 	case "":
-		return "—"
+		return metaStyle.Render("—")
 	}
 	return status
 }
@@ -163,7 +287,7 @@ func formatLabels(labels []github.Label) string {
 	for i, l := range labels {
 		names[i] = l.Name
 	}
-	return truncate(strings.Join(names, ", "), 18)
+	return truncate(strings.Join(names, ", "), 30)
 }
 
 func formatReviewers(reviewers []github.Reviewer) string {
@@ -181,7 +305,7 @@ func formatReviewers(reviewers []github.Reviewer) string {
 			parts[i] = r.Login
 		}
 	}
-	return truncate(strings.Join(parts, ", "), 13)
+	return truncate(strings.Join(parts, ", "), 25)
 }
 
 func timeAgo(t time.Time) string {

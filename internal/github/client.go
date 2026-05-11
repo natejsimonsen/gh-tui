@@ -246,7 +246,18 @@ func (c *Client) SearchPRs(ctx context.Context, repo Repo, author string, states
 	for _, s := range states {
 		q += " is:" + strings.ToLower(s)
 	}
+	return c.searchPRs(ctx, q, first, after)
+}
 
+func (c *Client) SearchReviewRequested(ctx context.Context, repo Repo, user string, states []string, first int, after string) (*PRListResult, error) {
+	q := fmt.Sprintf("is:pr repo:%s/%s review-requested:%s sort:updated-desc", repo.Owner, repo.Name, user)
+	for _, s := range states {
+		q += " is:" + strings.ToLower(s)
+	}
+	return c.searchPRs(ctx, q, first, after)
+}
+
+func (c *Client) searchPRs(ctx context.Context, q string, first int, after string) (*PRListResult, error) {
 	vars := map[string]any{
 		"query": q,
 		"first": first,

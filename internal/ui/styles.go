@@ -22,10 +22,13 @@ var (
 	authorStyle   lipgloss.Style
 	timeStyle     lipgloss.Style
 	dividerStyle  lipgloss.Style
-	diffAddStyle  lipgloss.Style
-	diffDelStyle  lipgloss.Style
-	diffHunkStyle lipgloss.Style
-	diffFileStyle lipgloss.Style
+	diffAddStyle        lipgloss.Style
+	diffDelStyle        lipgloss.Style
+	diffHunkStyle       lipgloss.Style
+	diffFileStyle       lipgloss.Style
+	diffFileBannerStyle lipgloss.Style
+	diffGutterStyle     lipgloss.Style
+	diffCtxStyle        lipgloss.Style
 )
 
 func init() {

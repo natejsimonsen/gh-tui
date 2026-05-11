@@ -45,6 +45,7 @@ func (m *HelpModel) renderContent() {
 	content += helpEntry("Enter", "View PR detail")
 	content += helpEntry("o/m/x/a", "Filter: open/merged/closed/all")
 	content += helpEntry("u", "Toggle my PRs")
+	content += helpEntry("r", "Toggle review requests")
 	content += helpEntry("b", "Open PR in browser")
 	content += helpEntry("t", "Cycle color theme")
 	content += helpEntry("?", "Toggle help")

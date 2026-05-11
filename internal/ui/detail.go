@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 	"github.com/natejsimonsen/gh-tui/internal/github"
 )
 
@@ -24,7 +23,14 @@ func NewDetailModel() DetailModel {
 
 func (m *DetailModel) SetPR(pr *github.PRDetail) {
 	m.pr = pr
-	m.renderContent()
+	if !m.ready {
+		return
+	}
+	if pr.Body != "" {
+		m.viewport.SetContent(pr.Body)
+	} else {
+		m.viewport.SetContent(metaStyle.Render("No description provided."))
+	}
 }
 
 func (m *DetailModel) SetSize(w, h int) {
@@ -43,29 +49,11 @@ func (m *DetailModel) SetSize(w, h int) {
 		m.viewport.Height = bodyH
 	}
 	if m.pr != nil {
-		m.renderContent()
-	}
-}
-
-func (m *DetailModel) renderContent() {
-	if m.pr == nil || m.width == 0 {
-		return
-	}
-
-	var content string
-	if m.pr.Body != "" {
-		rendered, err := glamour.Render(m.pr.Body, "auto")
-		if err != nil {
-			content = m.pr.Body
+		if m.pr.Body != "" {
+			m.viewport.SetContent(m.pr.Body)
 		} else {
-			content = rendered
+			m.viewport.SetContent(metaStyle.Render("No description provided."))
 		}
-	} else {
-		content = metaStyle.Render("No description provided.")
-	}
-
-	if m.ready {
-		m.viewport.SetContent(content)
 	}
 }
 
@@ -75,7 +63,7 @@ func (m DetailModel) headerView() string {
 	}
 	pr := m.pr
 
-	state := formatState(pr.State, pr.IsDraft)
+	state := renderState(pr.State, pr.IsDraft)
 	line1 := fmt.Sprintf("%s  %s",
 		titleStyle.Render(fmt.Sprintf("#%d %s", pr.Number, pr.Title)),
 		state,
