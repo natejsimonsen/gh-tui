@@ -13,7 +13,6 @@ type DetailModel struct {
 	viewport viewport.Model
 	pr       *github.PRDetail
 	width    int
-	height   int
 	ready    bool
 }
 
@@ -23,20 +22,12 @@ func NewDetailModel() DetailModel {
 
 func (m *DetailModel) SetPR(pr *github.PRDetail) {
 	m.pr = pr
-	if !m.ready {
-		return
-	}
-	if pr.Body != "" {
-		m.viewport.SetContent(pr.Body)
-	} else {
-		m.viewport.SetContent(metaStyle.Render("No description provided."))
-	}
+	m.renderContent()
 }
 
 func (m *DetailModel) SetSize(w, h int) {
 	m.width = w
-	m.height = h
-	bodyH := h - 6
+	bodyH := h - 2
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -48,18 +39,12 @@ func (m *DetailModel) SetSize(w, h int) {
 		m.viewport.Width = w
 		m.viewport.Height = bodyH
 	}
-	if m.pr != nil {
-		if m.pr.Body != "" {
-			m.viewport.SetContent(m.pr.Body)
-		} else {
-			m.viewport.SetContent(metaStyle.Render("No description provided."))
-		}
-	}
+	m.renderContent()
 }
 
-func (m DetailModel) headerView() string {
-	if m.pr == nil {
-		return ""
+func (m *DetailModel) renderContent() {
+	if !m.ready || m.pr == nil {
+		return
 	}
 	pr := m.pr
 
@@ -95,7 +80,16 @@ func (m DetailModel) headerView() string {
 
 	divider := dividerStyle.Render(strings.Repeat("─", m.width))
 
-	return fmt.Sprintf("%s\n%s\n%s\n%s", line1, line2, line3, divider)
+	var body string
+	if pr.Body != "" {
+		r := newRenderer(m.width)
+		body = "\n" + renderMarkdown(r, pr.Body)
+	} else {
+		body = "\n" + metaStyle.Render("No description provided.") + "\n"
+	}
+
+	content := fmt.Sprintf("%s\n%s\n%s\n%s%s", line1, line2, line3, divider, body)
+	m.viewport.SetContent(content)
 }
 
 func (m *DetailModel) GotoTop()    { m.viewport.GotoTop() }
@@ -108,8 +102,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 }
 
 func (m DetailModel) View() string {
-	if !m.ready {
+	if !m.ready || m.pr == nil {
 		return "Loading..."
 	}
-	return m.headerView() + "\n" + m.viewport.View()
+	return m.viewport.View()
 }

@@ -1,4 +1,5 @@
 /gh-tui
+/bench
 dist/
 *.exe
 *.dll
@@ -7,3 +8,4 @@ dist/
 *.test
 *.out
 .DS_Store
+testdata/mock/

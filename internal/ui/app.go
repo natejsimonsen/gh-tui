@@ -6,10 +6,12 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/natejsimonsen/gh-tui/internal/debug"
 	"github.com/natejsimonsen/gh-tui/internal/github"
 )
 
@@ -21,6 +23,7 @@ const (
 	ModeConversation
 	ModeChecks
 	ModeFiles
+	ModeReview
 	ModeHelp
 	ModeThemePicker
 )
@@ -34,9 +37,10 @@ type App struct {
 	conversation ConversationModel
 	checks       ChecksModel
 	files        DiffModel
+	review       ReviewModel
 	help         HelpModel
 
-	client         *github.Client
+	client         github.DataSource
 	repo           github.Repo
 	prDetail       *github.PRDetail
 	pageInfo       github.PageInfo
@@ -48,11 +52,15 @@ type App struct {
 	width  int
 	height int
 
-	loading     bool
-	statusMsg   string
-	pendingG    bool
-	themeIdx    int
-	themeCursor int
+	loading        bool
+	statusMsg      string
+	pendingG       bool
+	pendingReview  bool
+	themeIdx       int
+	themeCursor    int
+	detailCache    map[int]*github.PRDetail
+	prefetchQueue  []int
+	prefetchActive int
 }
 
 type prsLoadedMsg struct {
@@ -60,6 +68,11 @@ type prsLoadedMsg struct {
 }
 
 type prDetailLoadedMsg struct {
+	detail *github.PRDetail
+}
+
+type prPrefetchedMsg struct {
+	number int
 	detail *github.PRDetail
 }
 
@@ -71,7 +84,7 @@ type errMsg struct {
 	err error
 }
 
-func NewApp(client *github.Client, repo github.Repo, author string) App {
+func NewApp(client github.DataSource, repo github.Repo, author string) App {
 	return App{
 		mode:         ModeList,
 		list:         NewListModel(),
@@ -79,12 +92,14 @@ func NewApp(client *github.Client, repo github.Repo, author string) App {
 		conversation: NewConversationModel(),
 		checks:       NewChecksModel(),
 		files:        NewDiffModel(),
+		review:       NewReviewModel(),
 		help:         NewHelpModel(),
 		client:       client,
 		repo:         repo,
 		filter:       []string{"OPEN"},
 		author:       author,
 		filterByUser: author != "",
+		detailCache:  make(map[int]*github.PRDetail),
 	}
 }
 
@@ -101,6 +116,8 @@ func (a App) fetchPRs() tea.Cmd {
 	filterByReview := a.filterByReview
 	author := a.author
 	return func() tea.Msg {
+		debug.Println("fetchPRs: API call start")
+		start := time.Now()
 		var result *github.PRListResult
 		var err error
 		if filterByReview && author != "" {
@@ -111,8 +128,10 @@ func (a App) fetchPRs() tea.Cmd {
 			result, err = client.ListPRs(context.Background(), repo, filter, 50, cursor)
 		}
 		if err != nil {
+			debug.Printf("fetchPRs: API error %dms: %v", time.Since(start).Milliseconds(), err)
 			return errMsg{err}
 		}
+		debug.Printf("fetchPRs: API done %dms (%d PRs)", time.Since(start).Milliseconds(), len(result.PullRequests))
 		return prsLoadedMsg{result}
 	}
 }
@@ -121,10 +140,15 @@ func (a App) fetchPRDetail(number int) tea.Cmd {
 	client := a.client
 	repo := a.repo
 	return func() tea.Msg {
+		debug.Printf("fetchPRDetail: API call start #%d", number)
+		start := time.Now()
 		detail, err := client.GetPRDetail(context.Background(), repo, number)
 		if err != nil {
+			debug.Printf("fetchPRDetail: API error #%d %dms: %v", number, time.Since(start).Milliseconds(), err)
 			return errMsg{err}
 		}
+		debug.Printf("fetchPRDetail: API done #%d %dms (body=%d bytes, comments=%d, reviews=%d)",
+			number, time.Since(start).Milliseconds(), len(detail.Body), len(detail.Comments), len(detail.Reviews))
 		return prDetailLoadedMsg{detail}
 	}
 }
@@ -133,12 +157,95 @@ func (a App) fetchDiff(number int) tea.Cmd {
 	client := a.client
 	repo := a.repo
 	return func() tea.Msg {
+		debug.Printf("fetchDiff: API call start #%d", number)
+		start := time.Now()
 		diff, err := client.GetPRDiff(context.Background(), repo, number)
 		if err != nil {
+			debug.Printf("fetchDiff: API error #%d %dms: %v", number, time.Since(start).Milliseconds(), err)
 			return errMsg{err}
 		}
+		debug.Printf("fetchDiff: API done #%d %dms (%d bytes)", number, time.Since(start).Milliseconds(), len(diff))
 		return diffLoadedMsg{diff}
 	}
+}
+
+func (a App) submitReview(number int, input github.ReviewInput) tea.Cmd {
+	client := a.client
+	repo := a.repo
+	return func() tea.Msg {
+		debug.Printf("submitReview: start #%d event=%s", number, input.Event)
+		start := time.Now()
+		err := client.SubmitReview(context.Background(), repo, number, input)
+		if err != nil {
+			debug.Printf("submitReview: error #%d %dms: %v", number, time.Since(start).Milliseconds(), err)
+		} else {
+			debug.Printf("submitReview: done #%d %dms", number, time.Since(start).Milliseconds())
+		}
+		return reviewSubmittedMsg{err: err}
+	}
+}
+
+const maxPrefetch = 5
+
+func (a App) prefetchPR(number int) tea.Cmd {
+	client := a.client
+	repo := a.repo
+	return func() tea.Msg {
+		debug.Printf("prefetch: start #%d", number)
+		start := time.Now()
+		detail, err := client.GetPRDetail(context.Background(), repo, number)
+		if err != nil {
+			debug.Printf("prefetch: error #%d %dms: %v", number, time.Since(start).Milliseconds(), err)
+			return prPrefetchedMsg{number: number}
+		}
+		debug.Printf("prefetch: done #%d %dms", number, time.Since(start).Milliseconds())
+		return prPrefetchedMsg{number: number, detail: detail}
+	}
+}
+
+func (a *App) startPrefetch() tea.Cmd {
+	var cmds []tea.Cmd
+	for a.prefetchActive < maxPrefetch && len(a.prefetchQueue) > 0 {
+		number := a.prefetchQueue[0]
+		a.prefetchQueue = a.prefetchQueue[1:]
+		if _, ok := a.detailCache[number]; ok {
+			continue
+		}
+		a.prefetchActive++
+		cmds = append(cmds, a.prefetchPR(number))
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+func (a *App) enqueuePrefetch(prs []github.PullRequest) tea.Cmd {
+	a.prefetchQueue = nil
+	a.prefetchActive = 0
+	for _, pr := range prs {
+		if _, ok := a.detailCache[pr.Number]; !ok {
+			a.prefetchQueue = append(a.prefetchQueue, pr.Number)
+		}
+	}
+	debug.Printf("enqueuePrefetch: %d PRs queued", len(a.prefetchQueue))
+	return a.startPrefetch()
+}
+
+func (a *App) loadDetail(detail *github.PRDetail) {
+	if a.prDetail == nil || a.prDetail.Number != detail.Number {
+		a.review.Clear()
+	}
+	a.prDetail = detail
+	a.mode = ModeDetail
+	a.detail.SetPR(detail)
+	a.conversation.SetData(detail.Comments, detail.Reviews)
+	a.checks.SetChecks(detail.Checks)
+	a.files.Clear()
+}
+
+func (a App) isEditing() bool {
+	return a.mode == ModeReview && a.review.IsEditing()
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -152,10 +259,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.conversation.SetSize(msg.Width, contentH)
 		a.checks.SetSize(msg.Width, contentH)
 		a.files.SetSize(msg.Width, contentH)
+		a.review.SetSize(msg.Width, contentH)
 		a.help.SetSize(msg.Width, contentH)
 		return a, nil
 
 	case prsLoadedMsg:
+		debug.Printf("prsLoadedMsg: received (%d PRs), existing cache=%d", len(msg.result.PullRequests), len(a.detailCache))
 		a.loading = false
 		a.pageInfo = msg.result.PageInfo
 		a.list.SetPRs(msg.result.PullRequests)
@@ -166,23 +275,80 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.statusMsg = fmt.Sprintf("%d PRs", msg.result.TotalCount)
 		}
-		return a, nil
+		return a, a.enqueuePrefetch(msg.result.PullRequests)
+
+	case prPrefetchedMsg:
+		if a.prefetchActive > 0 {
+			a.prefetchActive--
+		}
+		if msg.detail != nil {
+			a.detailCache[msg.number] = msg.detail
+			debug.Printf("prPrefetchedMsg: cached #%d (total=%d queue=%d active=%d)",
+				msg.number, len(a.detailCache), len(a.prefetchQueue), a.prefetchActive)
+		}
+		return a, a.startPrefetch()
 
 	case prDetailLoadedMsg:
+		debug.Printf("prDetailLoadedMsg: #%d received", msg.detail.Number)
 		a.loading = false
-		a.prDetail = msg.detail
-		a.mode = ModeDetail
-		a.detail.SetPR(msg.detail)
-		a.conversation.SetData(msg.detail.Comments, msg.detail.Reviews)
-		a.checks.SetChecks(msg.detail.Checks)
-		a.files.SetDiff("")
+		a.detailCache[msg.detail.Number] = msg.detail
+		a.loadDetail(msg.detail)
 		return a, nil
 
 	case diffLoadedMsg:
-		a.loading = false
+		debug.Printf("diffLoadedMsg: received (%d bytes)", len(msg.diff))
 		a.files.SetDiff(msg.diff)
-		a.mode = ModeFiles
-		a.statusMsg = "Diff loaded"
+		a.statusMsg = "Rendering diff..."
+		cmd := renderDiffAsync(msg.diff, a.width)
+
+		if a.pendingReview && a.prDetail != nil {
+			a.pendingReview = false
+			a.review.SetData(a.prDetail.Number, a.prDetail.Title, msg.diff)
+			a.mode = ModeReview
+			a.loading = false
+			a.statusMsg = ""
+		}
+
+		return a, cmd
+
+	case diffRenderedMsg:
+		debug.Printf("diffRenderedMsg: %d files", msg.fileCount)
+		a.loading = false
+		a.files.SetRendered(msg)
+		if a.mode != ModeReview {
+			a.statusMsg = "Diff loaded"
+		}
+		return a, nil
+
+	case reviewWantsSubmitMsg:
+		if a.prDetail == nil {
+			return a, nil
+		}
+		input := github.ReviewInput{
+			Event: reviewActionEvents[msg.action],
+			Body:  msg.body,
+		}
+		for _, f := range a.review.files {
+			for _, c := range f.comments {
+				input.Comments = append(input.Comments, github.ReviewCommentInput{
+					Path: f.path,
+					Body: c,
+				})
+			}
+		}
+		a.loading = true
+		a.statusMsg = "Submitting review..."
+		return a, a.submitReview(a.prDetail.Number, input)
+
+	case reviewSubmittedMsg:
+		a.loading = false
+		if msg.err != nil {
+			a.statusMsg = "Review error: " + msg.err.Error()
+			return a, nil
+		}
+		a.statusMsg = "Review submitted!"
+		a.review.Clear()
+		a.mode = ModeDetail
 		return a, nil
 
 	case errMsg:
@@ -191,7 +357,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
-		if key.Matches(msg, keys.Quit) && a.mode != ModeThemePicker {
+		if msg.Type == tea.KeyCtrlC {
+			return a, tea.Quit
+		}
+		if key.Matches(msg, keys.Quit) && a.mode != ModeThemePicker && !a.isEditing() {
 			return a, tea.Quit
 		}
 		return a.handleKeys(msg)
@@ -203,6 +372,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a App) handleKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.mode == ModeThemePicker {
 		return a.handleThemePickerKeys(msg)
+	}
+
+	if a.mode == ModeReview {
+		if !a.isEditing() {
+			if key.Matches(msg, keys.Help) {
+				a.prevMode = a.mode
+				a.mode = ModeHelp
+				return a, nil
+			}
+		}
+		return a.handleReviewKeys(msg)
 	}
 
 	if key.Matches(msg, keys.Help) {
@@ -225,8 +405,10 @@ func (a App) handleKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.mode {
 	case ModeList:
 		return a.handleListKeys(msg)
-	default:
+	case ModeDetail, ModeConversation, ModeChecks, ModeFiles:
 		return a.handleViewKeys(msg)
+	default:
+		return a, nil
 	}
 }
 
@@ -242,6 +424,12 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Enter):
 		if pr := a.list.SelectedPR(); pr != nil {
+			if cached, ok := a.detailCache[pr.Number]; ok {
+				debug.Printf("Enter: CACHE HIT #%d %q", pr.Number, pr.Title)
+				a.loadDetail(cached)
+				return a, nil
+			}
+			debug.Printf("Enter: CACHE MISS #%d %q", pr.Number, pr.Title)
 			a.loading = true
 			a.statusMsg = fmt.Sprintf("Loading #%d...", pr.Number)
 			return a, a.fetchPRDetail(pr.Number)
@@ -249,24 +437,28 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Open):
 		a.filter = []string{"OPEN"}
 		a.pageInfo = github.PageInfo{}
+		a.detailCache = make(map[int]*github.PRDetail)
 		a.loading = true
 		a.statusMsg = "Loading open PRs..."
 		return a, a.fetchPRs()
 	case key.Matches(msg, keys.Merged):
 		a.filter = []string{"MERGED"}
 		a.pageInfo = github.PageInfo{}
+		a.detailCache = make(map[int]*github.PRDetail)
 		a.loading = true
 		a.statusMsg = "Loading merged PRs..."
 		return a, a.fetchPRs()
 	case key.Matches(msg, keys.Closed):
 		a.filter = []string{"CLOSED"}
 		a.pageInfo = github.PageInfo{}
+		a.detailCache = make(map[int]*github.PRDetail)
 		a.loading = true
 		a.statusMsg = "Loading closed PRs..."
 		return a, a.fetchPRs()
 	case key.Matches(msg, keys.All):
 		a.filter = nil
 		a.pageInfo = github.PageInfo{}
+		a.detailCache = make(map[int]*github.PRDetail)
 		a.loading = true
 		a.statusMsg = "Loading all PRs..."
 		return a, a.fetchPRs()
@@ -274,6 +466,7 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.filterByReview = false
 		a.filterByUser = !a.filterByUser
 		a.pageInfo = github.PageInfo{}
+		a.detailCache = make(map[int]*github.PRDetail)
 		a.loading = true
 		if a.filterByUser {
 			a.statusMsg = fmt.Sprintf("Loading @%s PRs...", a.author)
@@ -285,6 +478,7 @@ func (a App) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.filterByUser = false
 		a.filterByReview = !a.filterByReview
 		a.pageInfo = github.PageInfo{}
+		a.detailCache = make(map[int]*github.PRDetail)
 		a.loading = true
 		if a.filterByReview {
 			a.statusMsg = fmt.Sprintf("Loading reviews for @%s...", a.author)
@@ -311,44 +505,114 @@ func (a App) handleViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.pendingG {
 		a.pendingG = false
 		if msg.String() == "g" {
-			a.scrollTop()
+			switch a.mode {
+			case ModeDetail:
+				a.detail.GotoTop()
+			case ModeConversation:
+				a.conversation.GotoTop()
+			case ModeChecks:
+				a.checks.GotoTop()
+			case ModeFiles:
+				a.files.GotoTop()
+			}
 			return a, nil
 		}
 	}
 
 	switch {
 	case key.Matches(msg, keys.Back):
-		if a.mode == ModeDetail {
-			a.mode = ModeList
-		} else {
+		switch a.mode {
+		case ModeConversation, ModeChecks, ModeFiles:
 			a.mode = ModeDetail
+		default:
+			a.mode = ModeList
 		}
 		return a, nil
+
 	case key.Matches(msg, keys.Conversation):
 		a.mode = ModeConversation
 		return a, nil
+
 	case key.Matches(msg, keys.Checks):
 		a.mode = ModeChecks
 		return a, nil
+
 	case key.Matches(msg, keys.Files):
-		if !a.files.HasContent() && a.prDetail != nil {
+		if a.prDetail != nil && !a.files.HasContent() && a.files.raw == "" {
 			a.loading = true
 			a.statusMsg = "Loading diff..."
+			a.mode = ModeFiles
 			return a, a.fetchDiff(a.prDetail.Number)
 		}
 		a.mode = ModeFiles
 		return a, nil
+
+	case msg.String() == "R":
+		return a.enterReviewMode()
+
 	case key.Matches(msg, keys.Browser):
 		return a.openInBrowser()
+
 	case msg.String() == "G":
-		a.scrollBottom()
+		switch a.mode {
+		case ModeDetail:
+			a.detail.GotoBottom()
+		case ModeConversation:
+			a.conversation.GotoBottom()
+		case ModeChecks:
+			a.checks.GotoBottom()
+		case ModeFiles:
+			a.files.GotoBottom()
+		}
 		return a, nil
+
 	case msg.String() == "g":
 		a.pendingG = true
 		return a, nil
 	}
 
-	return a.updateActiveModel(msg)
+	var cmd tea.Cmd
+	switch a.mode {
+	case ModeDetail:
+		a.detail, cmd = a.detail.Update(msg)
+	case ModeConversation:
+		a.conversation, cmd = a.conversation.Update(msg)
+	case ModeChecks:
+		a.checks, cmd = a.checks.Update(msg)
+	case ModeFiles:
+		a.files, cmd = a.files.Update(msg)
+	}
+	return a, cmd
+}
+
+func (a App) handleReviewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyEscape && a.review.state == reviewTree {
+		a.mode = ModeDetail
+		return a, nil
+	}
+
+	var cmd tea.Cmd
+	a.review, cmd = a.review.Update(msg)
+	return a, cmd
+}
+
+func (a App) enterReviewMode() (tea.Model, tea.Cmd) {
+	if a.prDetail == nil {
+		return a, nil
+	}
+	if a.review.prNumber == a.prDetail.Number && len(a.review.files) > 0 {
+		a.mode = ModeReview
+		return a, nil
+	}
+	if a.files.raw != "" {
+		a.review.SetData(a.prDetail.Number, a.prDetail.Title, a.files.raw)
+		a.mode = ModeReview
+		return a, nil
+	}
+	a.pendingReview = true
+	a.loading = true
+	a.statusMsg = "Loading diff for review..."
+	return a, a.fetchDiff(a.prDetail.Number)
 }
 
 func (a App) handleThemePickerKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -377,36 +641,6 @@ func (a App) handleThemePickerKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-func (a *App) scrollTop() {
-	switch a.mode {
-	case ModeDetail:
-		a.detail.GotoTop()
-	case ModeConversation:
-		a.conversation.GotoTop()
-	case ModeChecks:
-		a.checks.GotoTop()
-	case ModeFiles:
-		a.files.GotoTop()
-	case ModeHelp:
-		a.help.GotoTop()
-	}
-}
-
-func (a *App) scrollBottom() {
-	switch a.mode {
-	case ModeDetail:
-		a.detail.GotoBottom()
-	case ModeConversation:
-		a.conversation.GotoBottom()
-	case ModeChecks:
-		a.checks.GotoBottom()
-	case ModeFiles:
-		a.files.GotoBottom()
-	case ModeHelp:
-		a.help.GotoBottom()
-	}
-}
-
 func (a App) updateActiveModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch a.mode {
@@ -420,6 +654,8 @@ func (a App) updateActiveModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.checks, cmd = a.checks.Update(msg)
 	case ModeFiles:
 		a.files, cmd = a.files.Update(msg)
+	case ModeReview:
+		a.review, cmd = a.review.Update(msg)
 	case ModeHelp:
 		a.help, cmd = a.help.Update(msg)
 	}
@@ -439,6 +675,8 @@ func (a App) View() string {
 		content = a.checks.View()
 	case ModeFiles:
 		content = a.files.View()
+	case ModeReview:
+		content = a.review.View()
 	case ModeHelp:
 		content = a.help.View()
 	case ModeThemePicker:
@@ -511,9 +749,15 @@ func (a App) footerView() string {
 	case ModeList:
 		help = "o/m/x/a  u:mine  r:reviews  ?:help  q:quit"
 	case ModeDetail:
-		help = "c/s/f  Esc:back  ?:help"
-	case ModeConversation, ModeChecks, ModeFiles:
-		help = "c/s/f  Esc:back  ?:help"
+		help = "c:conv  s:checks  f:files  R:review  Esc:back  ?:help"
+	case ModeConversation:
+		help = "s:checks  f:files  R:review  Esc:back  ?:help"
+	case ModeChecks:
+		help = "c:conv  f:files  R:review  Esc:back  ?:help"
+	case ModeFiles:
+		help = "c:conv  s:checks  R:review  Esc:back  ?:help"
+	case ModeReview:
+		help = a.review.FooterHelp()
 	case ModeHelp:
 		help = "Esc:close"
 	case ModeThemePicker:

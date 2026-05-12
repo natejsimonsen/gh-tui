@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/natejsimonsen/gh-tui/internal/debug"
 )
 
 type DiffModel struct {
@@ -17,27 +20,49 @@ type DiffModel struct {
 	fileCount int
 	additions int
 	deletions int
+	rendered  bool
 	width     int
 	ready     bool
+}
+
+type diffRenderedMsg struct {
+	content   string
+	raw       string
+	fileCount int
+	additions int
+	deletions int
 }
 
 func NewDiffModel() DiffModel {
 	return DiffModel{}
 }
 
-func (m *DiffModel) SetDiff(content string) {
-	m.raw = content
-	m.fileCount = strings.Count(content, "diff --git")
+func (m *DiffModel) SetDiff(raw string) {
+	m.raw = raw
+}
+
+func (m *DiffModel) SetRendered(msg diffRenderedMsg) {
+	m.fileCount = msg.fileCount
+	m.additions = msg.additions
+	m.deletions = msg.deletions
+	m.rendered = true
+	if m.ready {
+		m.viewport.SetContent(msg.content)
+	}
+}
+
+func (m *DiffModel) HasContent() bool { return m.rendered }
+
+func (m *DiffModel) Clear() {
+	m.raw = ""
+	m.rendered = false
+	m.fileCount = 0
 	m.additions = 0
 	m.deletions = 0
-	for _, line := range strings.Split(content, "\n") {
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			m.additions++
-		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
-			m.deletions++
-		}
+	if m.ready {
+		m.viewport.SetContent("")
+		m.viewport.GotoTop()
 	}
-	m.renderContent()
 }
 
 func (m *DiffModel) SetSize(w, h int) {
@@ -54,22 +79,69 @@ func (m *DiffModel) SetSize(w, h int) {
 		m.viewport.Width = w
 		m.viewport.Height = bodyH
 	}
-	m.renderContent()
 }
 
-func (m *DiffModel) renderContent() {
-	if m.width == 0 || !m.ready {
-		return
+func (m *DiffModel) GotoTop()    { m.viewport.GotoTop() }
+func (m *DiffModel) GotoBottom() { m.viewport.GotoBottom() }
+
+func (m DiffModel) Update(msg tea.Msg) (DiffModel, tea.Cmd) {
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
+}
+
+func (m DiffModel) View() string {
+	if !m.ready {
+		return "Loading..."
 	}
-	if m.raw == "" {
-		m.viewport.SetContent(metaStyle.Render("No changes."))
-		return
+
+	header := titleStyle.Render(fmt.Sprintf("Files Changed (%d)  %s  %s",
+		m.fileCount,
+		ciPassStyle.Render(fmt.Sprintf("+%d", m.additions)),
+		ciFailStyle.Render(fmt.Sprintf("-%d", m.deletions)),
+	))
+
+	if !m.rendered {
+		return header + "\n" + metaStyle.Render("Loading diff...")
+	}
+	return header + "\n" + m.viewport.View()
+}
+
+func renderDiffAsync(raw string, width int) tea.Cmd {
+	return func() tea.Msg {
+		start := time.Now()
+
+		fileCount := strings.Count(raw, "diff --git")
+		var additions, deletions int
+		for _, line := range strings.Split(raw, "\n") {
+			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+				additions++
+			} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+				deletions++
+			}
+		}
+
+		content := renderDiffContent(raw, width)
+		debug.Printf("renderDiffAsync: %dms (%d files, +%d/-%d)", time.Since(start).Milliseconds(), fileCount, additions, deletions)
+		return diffRenderedMsg{
+			content:   content,
+			raw:       raw,
+			fileCount: fileCount,
+			additions: additions,
+			deletions: deletions,
+		}
+	}
+}
+
+func renderDiffContent(raw string, width int) string {
+	if raw == "" {
+		return metaStyle.Render("No changes.")
 	}
 
 	const gutterW = 5
-	contentW := m.width - gutterW - 1
+	contentW := width - gutterW - 1
 
-	lines := strings.Split(m.raw, "\n")
+	lines := strings.Split(raw, "\n")
 
 	type fileSection struct {
 		name      string
@@ -93,9 +165,15 @@ func (m *DiffModel) renderContent() {
 	}
 
 	fileTokens := make([][][]chroma.Token, len(files))
+	var wg sync.WaitGroup
+	wg.Add(len(files))
 	for i, f := range files {
-		fileTokens[i] = tokenizeLines(getLexer(f.name), f.codeTexts)
+		go func(idx int, name string, texts []string) {
+			defer wg.Done()
+			fileTokens[idx] = tokenizeLines(getLexer(name), texts)
+		}(i, f.name, f.codeTexts)
 	}
+	wg.Wait()
 
 	var b strings.Builder
 	var oldNum, newNum int
@@ -110,7 +188,7 @@ func (m *DiffModel) renderContent() {
 			if fileIdx > 0 {
 				b.WriteByte('\n')
 			}
-			banner := diffFileBannerStyle.Width(m.width).Render(" " + files[fileIdx].name)
+			banner := diffFileBannerStyle.Width(width).Render(" " + files[fileIdx].name)
 			b.WriteString(banner + "\n")
 
 		case strings.HasPrefix(line, "index "),
@@ -180,7 +258,7 @@ func (m *DiffModel) renderContent() {
 		}
 	}
 
-	m.viewport.SetContent(b.String())
+	return b.String()
 }
 
 func extractFileName(diffLine string) string {
@@ -192,7 +270,6 @@ func extractFileName(diffLine string) string {
 }
 
 func extractHunkFunc(line string) string {
-	// @@ -10,5 +10,7 @@ func something()
 	idx := strings.Index(line, "@@")
 	if idx < 0 {
 		return line
@@ -246,43 +323,4 @@ func padLeft(s string, w int) string {
 		return s
 	}
 	return strings.Repeat(" ", w-len(s)) + s
-}
-
-func padRight(s string, w int) string {
-	vis := lipgloss.Width(s)
-	if vis >= w {
-		return s
-	}
-	return s + strings.Repeat(" ", w-vis)
-}
-
-func (m *DiffModel) HasContent() bool { return m.raw != "" }
-
-func (m *DiffModel) Clear() {
-	m.raw = ""
-	m.fileCount = 0
-	m.additions = 0
-	m.deletions = 0
-	if m.ready {
-		m.viewport.SetContent("")
-	}
-}
-
-func (m *DiffModel) GotoTop()    { m.viewport.GotoTop() }
-func (m *DiffModel) GotoBottom() { m.viewport.GotoBottom() }
-
-func (m DiffModel) Update(msg tea.Msg) (DiffModel, tea.Cmd) {
-	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
-}
-
-func (m DiffModel) View() string {
-	if !m.ready {
-		return "Loading..."
-	}
-	header := titleStyle.Render(fmt.Sprintf("Files Changed (%d)", m.fileCount)) +
-		"  " + ciPassStyle.Render(fmt.Sprintf("+%d", m.additions)) +
-		"  " + ciFailStyle.Render(fmt.Sprintf("-%d", m.deletions))
-	return header + "\n" + m.viewport.View()
 }

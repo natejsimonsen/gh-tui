@@ -72,6 +72,20 @@ func (m *HelpModel) renderContent() {
 	content += helpEntry("Esc", "Back to detail")
 	content += "\n"
 
+	content += authorStyle.Render("Review Mode") + "\n"
+	content += helpEntry("R", "Enter review mode (from detail/sub views)")
+	content += helpEntry("j/k", "Navigate files")
+	content += helpEntry("G/g", "Jump to bottom/top")
+	content += helpEntry("m", "Toggle file as reviewed")
+	content += helpEntry("a", "Add comment on file")
+	content += helpEntry("x", "Delete last comment on file")
+	content += helpEntry("Enter", "View file diff")
+	content += helpEntry("S", "Open submit screen")
+	content += helpEntry("Ctrl+S", "Save comment / Submit review")
+	content += helpEntry("Tab", "Switch focus (submit screen)")
+	content += helpEntry("Esc", "Back")
+	content += "\n"
+
 	content += authorStyle.Render("Theme Picker") + "\n"
 	content += helpEntry("j/k", "Navigate themes")
 	content += helpEntry("Enter", "Apply theme")

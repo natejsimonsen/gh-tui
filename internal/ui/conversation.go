@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
+	"github.com/natejsimonsen/gh-tui/internal/debug"
 	"github.com/natejsimonsen/gh-tui/internal/github"
+
+	glamour "charm.land/glamour/v2"
 )
 
 type timelineEntry struct {
@@ -28,55 +31,77 @@ func NewConversationModel() ConversationModel {
 	return ConversationModel{}
 }
 
+func newRenderer(width int) *glamour.TermRenderer {
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return nil
+	}
+	return r
+}
+
+func renderMarkdown(r *glamour.TermRenderer, body string) string {
+	if r == nil {
+		return body + "\n"
+	}
+	out, err := r.Render(body)
+	if err != nil {
+		return body + "\n"
+	}
+	return out
+}
+
 func (m *ConversationModel) SetData(comments []github.Comment, reviews []github.Review) {
-	var entries []timelineEntry
+	start := time.Now()
+	total := len(comments) + len(reviews)
+	entries := make([]timelineEntry, total)
 
-	for _, c := range comments {
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("%s  %s\n",
-			authorStyle.Render(c.Author),
-			timeStyle.Render(timeAgo(c.CreatedAt)),
-		))
-		rendered, err := glamour.Render(c.Body, "auto")
-		if err != nil {
-			b.WriteString(c.Body + "\n")
-		} else {
-			b.WriteString(rendered)
-		}
-		entries = append(entries, timelineEntry{timestamp: c.CreatedAt, content: b.String()})
+	var wg sync.WaitGroup
+	wg.Add(total)
+
+	for i, c := range comments {
+		go func(idx int, c github.Comment) {
+			defer wg.Done()
+			r := newRenderer(m.width)
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("%s  %s\n",
+				authorStyle.Render(c.Author),
+				timeStyle.Render(timeAgo(c.CreatedAt)),
+			))
+			b.WriteString(renderMarkdown(r, c.Body))
+			entries[idx] = timelineEntry{timestamp: c.CreatedAt, content: b.String()}
+		}(i, c)
 	}
 
-	for _, r := range reviews {
-		var b strings.Builder
-		icon := reviewStateIcon(r.State)
-		b.WriteString(fmt.Sprintf("%s %s  %s\n",
-			icon,
-			authorStyle.Render(r.Author),
-			timeStyle.Render(timeAgo(r.SubmittedAt)),
-		))
-		if r.Body != "" {
-			rendered, err := glamour.Render(r.Body, "auto")
-			if err != nil {
-				b.WriteString(r.Body + "\n")
-			} else {
-				b.WriteString(rendered)
+	for i, r := range reviews {
+		go func(idx int, r github.Review) {
+			defer wg.Done()
+			renderer := newRenderer(m.width)
+			var b strings.Builder
+			icon := reviewStateIcon(r.State)
+			b.WriteString(fmt.Sprintf("%s %s  %s\n",
+				icon,
+				authorStyle.Render(r.Author),
+				timeStyle.Render(timeAgo(r.SubmittedAt)),
+			))
+			if r.Body != "" {
+				b.WriteString(renderMarkdown(renderer, r.Body))
 			}
-		}
-		for _, rc := range r.Comments {
-			path := metaStyle.Render(rc.Path)
-			if rc.Line > 0 {
-				path += metaStyle.Render(fmt.Sprintf(":%d", rc.Line))
+			for _, rc := range r.Comments {
+				path := metaStyle.Render(rc.Path)
+				if rc.Line > 0 {
+					path += metaStyle.Render(fmt.Sprintf(":%d", rc.Line))
+				}
+				b.WriteString(fmt.Sprintf("  %s\n", path))
+				b.WriteString(renderMarkdown(renderer, rc.Body))
 			}
-			b.WriteString(fmt.Sprintf("  %s\n", path))
-			rendered, err := glamour.Render(rc.Body, "auto")
-			if err != nil {
-				b.WriteString("  " + rc.Body + "\n")
-			} else {
-				b.WriteString(rendered)
-			}
-		}
-		entries = append(entries, timelineEntry{timestamp: r.SubmittedAt, content: b.String()})
+			entries[idx] = timelineEntry{timestamp: r.SubmittedAt, content: b.String()}
+		}(len(comments)+i, r)
 	}
+
+	wg.Wait()
 
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].timestamp.Before(entries[j].timestamp)
@@ -94,6 +119,7 @@ func (m *ConversationModel) SetData(comments []github.Comment, reviews []github.
 	if m.ready {
 		m.viewport.SetContent(full.String())
 	}
+	debug.Printf("SetData: %dms (%d entries)", time.Since(start).Milliseconds(), total)
 }
 
 func (m *ConversationModel) SetSize(w, h int) {

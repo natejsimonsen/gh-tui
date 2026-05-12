@@ -568,6 +568,54 @@ func (c *Client) GetPRDiff(ctx context.Context, repo Repo, number int) (string, 
 	return string(body), nil
 }
 
+func (c *Client) SubmitReview(ctx context.Context, repo Repo, number int, input ReviewInput) error {
+	type apiComment struct {
+		Path        string `json:"path"`
+		Body        string `json:"body"`
+		SubjectType string `json:"subject_type,omitempty"`
+	}
+	type apiBody struct {
+		Body     string       `json:"body,omitempty"`
+		Event    string       `json:"event"`
+		Comments []apiComment `json:"comments,omitempty"`
+	}
+
+	payload := apiBody{Body: input.Body, Event: input.Event}
+	for _, rc := range input.Comments {
+		payload.Comments = append(payload.Comments, apiComment{
+			Path:        rc.Path,
+			Body:        rc.Body,
+			SubjectType: "file",
+		})
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reviews", repo.Owner, repo.Name, number)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("review submission failed (%s): %s", resp.Status, string(respBody))
+	}
+	return nil
+}
+
 func ParseRepo(s string) (Repo, error) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

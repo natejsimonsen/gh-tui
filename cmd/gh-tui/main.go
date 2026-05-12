@@ -1,33 +1,53 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/natejsimonsen/gh-tui/internal/debug"
 	"github.com/natejsimonsen/gh-tui/internal/github"
 	"github.com/natejsimonsen/gh-tui/internal/ui"
 )
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
-		printUsage()
-		os.Exit(0)
+	mockData := flag.String("mock-data", "", "path to mock data directory (bypasses GitHub API)")
+	debugMode := flag.Bool("debug", false, "enable debug logging to stderr")
+	flag.Usage = printUsage
+	flag.Parse()
+
+	if *debugMode {
+		debug.Enable()
 	}
 
-	client, err := github.NewClient()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-		os.Exit(1)
-	}
-
-	var repo github.Repo
-	if len(os.Args) > 1 {
-		repo, err = github.ParseRepo(os.Args[1])
+	var client github.DataSource
+	if *mockData != "" {
+		mc, err := github.NewMockClient(*mockData)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 			os.Exit(1)
 		}
+		client = mc
+	} else {
+		c, err := github.NewClient()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			os.Exit(1)
+		}
+		client = c
+	}
+
+	var repo github.Repo
+	var err error
+	if flag.NArg() > 0 {
+		repo, err = github.ParseRepo(flag.Arg(0))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			os.Exit(1)
+		}
+	} else if *mockData != "" {
+		repo = github.Repo{Owner: "mock-org", Name: "mock-repo"}
 	} else {
 		repo, err = github.DetectRepo()
 		if err != nil {
@@ -36,7 +56,11 @@ func main() {
 		}
 	}
 
-	author := github.DetectUser()
+	author := "mockuser"
+	if *mockData == "" {
+		author = github.DetectUser()
+	}
+
 	app := ui.NewApp(client, repo, author)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -49,7 +73,10 @@ func printUsage() {
 	fmt.Println(`gh-tui - A minimal terminal UI for GitHub pull requests
 
 Usage:
-  gh-tui [owner/repo]
+  gh-tui [flags] [owner/repo]
+
+Flags:
+  --mock-data <dir>  Use mock JSON data from directory (bypasses GitHub API)
 
 If no repo is specified, detects from git remote origin.
 

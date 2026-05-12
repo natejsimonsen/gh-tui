@@ -1,6 +1,18 @@
 package github
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+type DataSource interface {
+	ListPRs(ctx context.Context, repo Repo, states []string, first int, after string) (*PRListResult, error)
+	SearchPRs(ctx context.Context, repo Repo, author string, states []string, first int, after string) (*PRListResult, error)
+	SearchReviewRequested(ctx context.Context, repo Repo, user string, states []string, first int, after string) (*PRListResult, error)
+	GetPRDetail(ctx context.Context, repo Repo, number int) (*PRDetail, error)
+	GetPRDiff(ctx context.Context, repo Repo, number int) (string, error)
+	SubmitReview(ctx context.Context, repo Repo, number int, input ReviewInput) error
+}
 
 type Repo struct {
 	Owner string
@@ -91,4 +103,15 @@ type PRListResult struct {
 	PullRequests []PullRequest
 	PageInfo     PageInfo
 	TotalCount   int
+}
+
+type ReviewInput struct {
+	Event    string
+	Body     string
+	Comments []ReviewCommentInput
+}
+
+type ReviewCommentInput struct {
+	Path string
+	Body string
 }
